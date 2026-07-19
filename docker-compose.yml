@@ -1,0 +1,111 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # TRAEFIK - REVERSE PROXY & LOAD BALANCER
+  # ============================================
+  traefik:
+    image: traefik:v2.10
+    container_name: ims-traefik
+    restart: always
+    command:
+      - "--api.insecure=true"                          # Enable Traefik dashboard (dev only)
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--log.level=INFO"
+      - "--accesslog=true"
+    ports:
+      - "80:80"       # Main application traffic
+      - "8080:8080"   # Traefik dashboard (http://localhost:8080)
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      - ims-network
+
+  # ============================================
+  # BACKEND INSTANCE 1 (Load Balanced)
+  # ============================================
+  backend1:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ims-backend-1
+    restart: always
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    environment:
+      - PORT=5000
+      - INSTANCE_ID=backend-instance-1
+      - JWT_SECRET=${JWT_SECRET}
+      - DATABASE_URL=${DATABASE_URL}
+    labels:
+      - "traefik.enable=true"
+      # Both backend services share the same router "backend"
+      - "traefik.http.routers.backend.rule=Host(`localhost`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.backend.entrypoints=web"
+      # Load balance service name
+      - "traefik.http.services.backend-lb.loadbalancer.server.port=5000"
+      - "traefik.http.routers.backend.service=backend-lb"
+    networks:
+      - ims-network
+
+  # ============================================
+  # BACKEND INSTANCE 2 (Load Balanced)
+  # ============================================
+  backend2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ims-backend-2
+    restart: always
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    environment:
+      - PORT=5000
+      - INSTANCE_ID=backend-instance-2
+      - JWT_SECRET=${JWT_SECRET}
+      - DATABASE_URL=${DATABASE_URL}
+    labels:
+      - "traefik.enable=true"
+      # Same router name — Traefik auto-balances between backend1 and backend2
+      - "traefik.http.routers.backend.rule=Host(`localhost`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.backend.entrypoints=web"
+      - "traefik.http.services.backend-lb.loadbalancer.server.port=5000"
+      - "traefik.http.routers.backend.service=backend-lb"
+    networks:
+      - ims-network
+
+  # ============================================
+  # FRONTEND - Next.js App
+  # ============================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+    container_name: ims-frontend
+    restart: always
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost/api
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`localhost`)"
+      - "traefik.http.routers.frontend.entrypoints=web"
+      - "traefik.http.routers.frontend.priority=1"
+      - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+    networks:
+      - ims-network
+    depends_on:
+      - backend1
+      - backend2
+
+networks:
+  ims-network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "1350"
